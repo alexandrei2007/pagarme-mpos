@@ -79,6 +79,8 @@ namespace PagarMePOS
         /// <returns></returns>
         public async Task CreateTransaction(int amount, PagarMe.Mpos.PaymentMethod paymentMethod)
         {
+            Console.WriteLine(System.Environment.NewLine);
+
             using (var port = new SerialPort(this.portName))
             {
                 port.Open();
@@ -86,47 +88,55 @@ namespace PagarMePOS
                 using (var mpos = CreateMposInstance(port))
                 {
                     await mpos.Initialize();
-
+                    
                     try
                     {
-                        var result = await mpos.ProcessPayment(amount, this.GetEmvApplications(paymentMethod), paymentMethod)
-                            .HandleMposException(new TimeSpan(0, 0, CARD_READ_TIMEOUT), mpos);
+                        PaymentResult result = await mpos.ProcessPayment(amount, this.GetEmvApplications(paymentMethod), paymentMethod)
+                            .TimeoutAfter(new TimeSpan(0, 0, CARD_READ_TIMEOUT));
 
-                        Transaction transaction = new Transaction();
-                        transaction.Amount = amount;
-                        transaction.CardHash = result.CardHash;
+                        if (result.Status == PaymentStatus.Accepted)
+                        {
+                            Transaction transaction = new Transaction();
+                            transaction.Amount = amount;
+                            transaction.CardHash = result.CardHash;
 
-                        await transaction.SaveAsync();
+                            await transaction.SaveAsync();
 
-                        int responseCode;
-                        int.TryParse(transaction.AcquirerResponseCode, out responseCode);
+                            int responseCode;
+                            int.TryParse(transaction.AcquirerResponseCode, out responseCode);
 
-                        await mpos.FinishTransaction(true, responseCode, transaction.Card.FirstDigits);
+                            object emvData = transaction["card_emv_response"];
 
-                        mpos.Display("TRANSACTION FINISHED");
-                        await Task.Delay(2000);
+                            await mpos.FinishTransaction(true, responseCode, (string)emvData);
+                            await mpos.Close();
+
+                            Console.WriteLine("TRANSACTION FINISHED: " + transaction.Id);
+                            await Task.Delay(2000);
+                        }
+                        else
+                        {
+                            Console.WriteLine("TRANSACTION FAILED");
+                            Console.WriteLine("ErrorCode:" + (result.ErrorCode != null ? ((PinPadErrors)result.ErrorCode).ToString() : "UNDEFINED"));
+                            Console.WriteLine("Status:" + result.Status.ToString());
+                        }
                     }
                     catch (PinPadException ex1)
                     {
-                        System.Diagnostics.Debug.WriteLine("PinPadException: {0}\n{1}", ex1.Message, ex1.StackTrace);
+                        Console.WriteLine("PinPadException: " + ex1.ErrorCode + " - " + ex1.Message);
                         mpos.Display(ex1.Message);
                         await Task.Delay(2000);
                     }
                     catch (TimeoutException ex2)
                     {
-                        System.Diagnostics.Debug.WriteLine("TimeoutException: {0}\n{1}", ex2.Message, ex2.StackTrace);
+                        Console.WriteLine("TimeoutException: " + ex2.Message);
                         mpos.Display("CARD READ TIMEOUT");
                         await Task.Delay(2000);
                     }
                     catch (Exception ex3)
                     {
-                        System.Diagnostics.Debug.WriteLine("Exception: {0}\n{1}", ex3.Message, ex3.StackTrace);
+                        Console.WriteLine("Exception: " + ex3.Message);
                         mpos.Display("AN ERROR OCURRED");
                         await Task.Delay(2000);
-                    }
-                    finally
-                    {
-                        await mpos.Close();
                     }
                 }
             }
@@ -185,11 +195,9 @@ namespace PagarMePOS
             {
                 System.Diagnostics.Debug.WriteLine("OperationCompleted");
             };
-            mpos.Errored += async (sender, e) =>
+            mpos.Errored += (sender, e) =>
             {
                 System.Diagnostics.Debug.WriteLine("Errored: {0} {1}", e, ((PinPadErrors)e).GetFriendlyMessage());
-
-                await mpos.Close();
             };
 
             return mpos;
